@@ -1,0 +1,98 @@
+name: Build DrvLoader
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup MSVC Environment
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
+    - name: Compile resources
+      run: rc.exe /nologo /fo drvloader.res drvloader.rc
+      shell: cmd
+
+    - name: Create output directory
+      run: mkdir bin\x64\Release 2>nul || exit 0
+      shell: cmd
+
+    - name: Build DrvLoader
+      run: cl.exe /nologo /utf-8 /GS- /Gy /Gw /Os /Brepro /Oy /GF /EHsc /MD /std:c++latest /DNDEBUG /D_CONSOLE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /DUNICODE /D_UNICODE DrvLoader.cpp ConfigManager.cpp ResourceInstaller.cpp DrvCore.cpp SymbolDownloader.cpp UserInterface.cpp drvloader.res /link /OPT:REF /OPT:ICF=10 /MERGE:.rdata=.text /MERGE:.pdata=.text /NXCOMPAT /DYNAMICBASE /INCREMENTAL:NO /Brepro /SUBSYSTEM:CONSOLE /MACHINE:X64 kernel32.lib user32.lib psapi.lib advapi32.lib /OUT:bin\x64\Release\drvloader.exe
+      shell: cmd
+
+    - name: Post-build timestamp normalization
+      run: powershell -Command "& {$f='bin\x64\Release\drvloader.exe'; if (Test-Path $f) { (Get-Item $f).CreationTime='2026-01-01 00:00:00'; (Get-Item $f).LastWriteTime='2026-01-01 00:00:00' }}"
+
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: drvloader-x64
+        path: bin\x64\Release\drvloader.exe
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+
+    steps:
+    - name: Download x64 artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: drvloader-x64
+        path: ./release
+
+    - name: Generate SHA-256 checksums
+      id: checksums
+      run: |
+        set -euo pipefail
+        cd release
+        {
+          echo "sha256<<EOF"
+          find . -maxdepth 1 -type f ! -name 'sha256hashes.txt' -print0 | sort -z | xargs -0 sha256sum | sed 's|^\([a-f0-9]\+\)  \./|\1  |' | tee sha256hashes.txt
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Generate release info
+      id: release_info
+      run: |
+        echo "tag=v$(date +'%Y.%m.%d')-$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+        echo "date=$(date +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.release_info.outputs.tag }}
+        name: Release ${{ steps.release_info.outputs.tag }}
+        body: |
+          **Build Date:** ${{ steps.release_info.outputs.date }}
+
+          **Changes:**
+          ${{ github.event.head_commit.message }}
+
+          > [!NOTE]
+          > Automatic build of DrvLoader.
+
+          **SHA-256 Hashes:**
+          ```
+          ${{ steps.checksums.outputs.sha256 }}
+          ```
+          
+        draft: false
+        prerelease: false
+        files: |
+          ./release/drvloader.exe
+          ./release/sha256hashes.txt
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
